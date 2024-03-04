@@ -11,6 +11,8 @@ import {
   createClient,
 } from "matrix-js-sdk";
 
+import { supabase } from "./supabase";
+
 // 配置文件
 const configs = {
   homeservers: {
@@ -26,11 +28,13 @@ const configs = {
       api_url: "http://localhost:11434",
     },
   },
+
+  application_id: "7a225549-1703-43aa-a2a2-5947f2fc8d41",
 };
 
 const api = axios.create({ baseURL: configs.services["ollama"].api_url });
 
-// 状态层
+// 状态层和存储层
 const useCounterStore = defineStore("counter", {
   state: () => ({
     counter: 0,
@@ -41,13 +45,50 @@ const useCounterStore = defineStore("counter", {
   },
 
   actions: {
-    increment() {
-      this.counter++;
+    async syncState() {
+      const { data, error } = await supabase
+        .from("stores")
+        .select()
+        .eq("id", configs.application_id);
+
+      if (!error) {
+        const { state = {} } = data.at(0) || {};
+        const { counter = this.counter } = state;
+
+        this.counter = counter;
+      }
+    },
+
+    async increment() {
+      const { data, error } = await supabase
+        .from("stores")
+        .upsert({
+          id: configs.application_id,
+          state: { counter: this.counter + 1 },
+        })
+        .select();
+
+      if (!error) {
+        this.counter = data.at(0).state.counter;
+      }
     },
   },
 });
 
 const store = useCounterStore();
+
+store.syncState();
+
+supabase
+  .channel("stores")
+  .on(
+    "postgres_changes",
+    { event: "*", schema: "public", table: "stores" },
+    (payload) => {
+      console.log("Change received!", payload);
+    }
+  )
+  .subscribe();
 
 // 服务层
 const schema = buildSchema(`
@@ -72,9 +113,8 @@ const rootValue = {
     return store.doubleCount;
   },
 
-  increment: () => {
-    store.increment();
-    return store.counter;
+  increment: async () => {
+    return store.increment().then(() => store.counter);
   },
 
   chat: async ({ model = "llama2", prompt }) => {
